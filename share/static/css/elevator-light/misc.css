@@ -52,7 +52,7 @@ textarea.messagebox, #cke_Content, #cke_UpdateContent {
 }
 
 .datepicker {
-    width: 17em;
+    width: 13rem;
 }
 
 .dashboard-subscription tr.frequency .value input {
@@ -126,7 +126,7 @@ svg.icon-helper {
 
 /* row colouring */
 .oddline {
-    background-color: rgba(0, 0, 0, 0.05);
+    background-color: rgba(242, 242, 242);
 }
 
 .cke_toolgroup a.cke_button {
