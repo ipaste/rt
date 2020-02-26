@@ -1056,6 +1056,9 @@ sub ValidateLifecycle {
         inactive => [],
         actions => [],
     };
+    unless ( $lifecycle->{'initial'}[0] ) {
+        push @warnings, "Initial type status required";
+    }
 
     my @statuses;
     $lifecycle->{canonical_case} = {};
