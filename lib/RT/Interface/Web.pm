@@ -1894,6 +1894,10 @@ sub Menu {
     return $HTML::Mason::Commands::m->notes('menu');
 }
 
+sub SearchResultsPageMenu {
+    return $HTML::Mason::Commands::m->notes('search-results-page-menu');
+}
+
 sub PageMenu {
     return $HTML::Mason::Commands::m->notes('page-menu');
 }
@@ -1917,7 +1921,9 @@ sub RenderMenu {
     $res .= '<ul';
     $res .= ' id="'. $interp->apply_escapes($id, 'h') .'"'
         if $id;
-    $res .= ' class="toplevel"' if $toplevel;
+    my $class = $args{class} // '';
+    $class .= ' toplevel' if $toplevel;
+    $res .= " class='$class'";
     $res .= ">\n";
 
     for my $child ($menu->children) {
@@ -1943,7 +1949,7 @@ sub RenderMenu {
             if ( $tmp = $child->class ) {
                 $res .= ' '. $interp->apply_escapes($tmp, 'h');
             }
-            $res .= ' btn' if ( defined $id && $id eq 'page-menu' );
+            $res .= ' btn' if ( defined $id && ( $id eq 'page-menu' || $id eq 'search-results-page-menu' ) );
             $res .= '"';
 
             my $path = $child->path;
