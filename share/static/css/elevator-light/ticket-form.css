@@ -75,3 +75,8 @@
 .refreshing {
     opacity: 0.3;
 }
+
+.one-time-bcc, .one-time-cc {
+    margin-top: 0;
+    margin-bottom: 1.0em;
+}
