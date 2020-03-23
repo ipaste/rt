@@ -111,55 +111,35 @@ sub Create {
     my ( $id, $msg ) = $self->ValidateName( $args{'Name'} );
     return ( 0, $msg ) unless $id;
 
-    my $meta = RT->Config->Meta($args{'Name'});
-    if ($meta->{Immutable}) {
-        return ( 0, $self->loc("You cannot update [_1] using database config; you must edit your site config", $args{'Name'}) );
-    }
-
-    ( $id, $msg ) = $self->ValidateContent( Name => $args{'Name'}, Content => $args{'Content'} );
-    return ( 0, $msg ) unless $id;
-
-    if (ref ($args{'Content'}) ) {
-        ($args{'Content'}, my $error) = $self->_SerializeContent($args{'Content'}, $args{'Name'});
-        if ($error) {
-            return (0, $error);
-        }
-        $args{'ContentType'} = 'perl';
-    }
-
-    my $old_value = RT->Config->Get($args{Name});
-    unless (defined($old_value) && length($old_value)) {
-        $old_value = $self->loc('(no value)');
-    }
-
-    ( $id, $msg ) = $self->SUPER::Create(
-        map { $_ => $args{$_} } grep {exists $args{$_}}
-            qw(Name Content ContentType),
-    );
+    ( $id, $msg ) = $self->_Create(%args);
     unless ($id) {
-        return (0, $self->loc("Setting [_1] to [_2] failed: [_3]", $args{Name}, $args{Content}, $msg));
+        return (0, $msg);
     }
-
-    RT->Config->ApplyConfigChangeToAllServerProcesses;
 
     my ($content, $error) = $self->Content;
     unless (defined($content) && length($content)) {
         $content = $self->loc('(no value)');
     }
 
+    my ( $Trans, $tx_msg, $TransObj ) = $self->_NewTransaction(
+        Type => 'SetConfig',
+        Field => $self->Name,
+        ObjectType => 'RT::Configuration',
+        ObjectId => $self->id,
+        ReferenceType => ref($self),
+        NewReference => $self->id,
+    );
+    unless ($Trans) {
+        return (0, $self->loc("Setting [_1] to [_2] failed: [_3]", $args{Name}, $content, $tx_msg));
+    }
+
+    RT->Config->ApplyConfigChangeToAllServerProcesses;
+
+    my $old_value = RT->Config->Get($args{Name});
     if ( ref $old_value ) {
         $old_value = $self->_SerializeContent($old_value);
     }
-
-    RT->Logger->info(
-        sprintf(
-            '%s changed %s from "%s" to "%s"',
-            $self->CurrentUser->Name,
-            $self->Name,
-            $old_value // '',
-            $content // ''
-        )
-    );
+    RT->Logger->info($self->CurrentUser->Name . " changed " . $args{Name});
     return ( $id, $self->loc( '[_1] changed from "[_2]" to "[_3]"', $self->Name, $old_value // '', $content // '' ) );
 }
 
@@ -239,10 +219,27 @@ processes.
 sub Delete {
     my $self = shift;
     return (0, $self->loc("Permission Denied")) unless $self->CurrentUserCanSee;
-    my ($ok, $msg) = $self->SUPER::Delete(@_);
-    return ($ok, $msg) if !$ok;
+
+    $RT::Handle->BeginTransaction;
+    my ( $ok, $msg ) = $self->SetDisabled( 1 );
+    unless ($ok) {
+        $RT::Handle->Rollback;
+        return ($ok, $msg);
+    }
+
+    my ( $Trans, $Msg, $TransObj ) = $self->_NewTransaction(
+        Type => 'DeleteConfig',
+        Field => $self->Name,
+        ObjectType => 'RT::Configuration',
+        ObjectId => $self->Id,
+        ReferenceType => ref($self),
+        OldReference => $self->id,
+    );
+
+    $RT::Handle->Commit;
     RT->Config->ApplyConfigChangeToAllServerProcesses;
     RT->Logger->info($self->CurrentUser->Name . " removed database setting for " . $self->Name);
+
     return ($ok, $self->loc("Database setting removed."));
 }
 
@@ -276,57 +273,62 @@ sub DecodedContent {
 
 sub SetContent {
     my $self         = shift;
-    my $value        = shift;
+    my $raw_value    = shift;
     my $content_type = shift || '';
 
     return (0, $self->loc("Permission Denied")) unless $self->CurrentUserCanSee;
 
-    my ( $ok, $msg ) = $self->ValidateContent( Content => $value );
+    my ( $ok, $msg ) = $self->ValidateContent( Content => $raw_value );
     return ( 0, $msg ) unless $ok;
+
+    $RT::Handle->BeginTransaction;
+    ( $ok, $msg ) = $self->SetDisabled( 1 );
+    unless ($ok) {
+        $RT::Handle->Rollback;
+        return ($ok, $msg);
+    }
+
+    my ( $new_id, $new_msg, $value ) = $self->_Create(
+        Name => $self->Name,
+        Content => $raw_value,
+        ContentType => $content_type,
+        _Replace => 1
+    );
+
+    unless ($new_id) {
+        $RT::Handle->Rollback;
+        return (0, $self->loc("Setting [_1] to [_2] failed: [_3]", $self->Name, $value, $new_msg));
+    }
+
+    unless (defined($value) && length($value)) {
+        $value = $self->loc('(no value)');
+    }
+
+    my ( $Trans, $tx_msg, $TransObj ) = $self->_NewTransaction(
+        Type => 'SetConfig',
+        Field => $self->Name,
+        ObjectType => 'RT::Configuration',
+        ObjectId => $new_id,
+        ReferenceType => ref($self),
+        OldReference => $self->id,
+        NewReference => $new_id,
+    );
+    unless ($Trans) {
+        $RT::Handle->Rollback();
+        return (0, $self->loc("Setting [_1] to [_2] failed: [_3]", $self->Name, $value, $tx_msg));
+    }
+
+    $RT::Handle->Commit;
+    RT->Config->ApplyConfigChangeToAllServerProcesses;
 
     my ($old_value, $error) = $self->Content;
     unless (defined($old_value) && length($old_value)) {
         $old_value = $self->loc('(no value)');
     }
 
-    if (ref $value) {
-        ($value, my $error) = $self->_SerializeContent($value);
-        if ($error) {
-            return (0, $error);
-        }
-        $content_type = 'perl';
-    }
+    RT->Logger->info($self->CurrentUser->Name . " changed " . $self->Name);
+    return( 1, $self->loc('[_1] changed from "[_2]" to "[_3]"', $self->Name, $old_value // '', $value // '') );
 
-    $RT::Handle->BeginTransaction;
-
-    ($ok, $msg) = $self->_Set( Field => 'Content', Value => $value );
-    if (!$ok) {
-        $RT::Handle->Rollback;
-        return ($ok, $self->loc("Unable to update [_1]: [_2]", $self->Name, $msg));
-    }
-
-    if ($self->ContentType ne $content_type) {
-        ($ok, $msg) = $self->_Set( Field => 'ContentType', Value => $content_type );
-        if (!$ok) {
-            $RT::Handle->Rollback;
-            return ($ok, $self->loc("Unable to update [_1]: [_2]", $self->Name, $msg));
-        }
-    }
-
-    $RT::Handle->Commit;
-    RT->Config->ApplyConfigChangeToAllServerProcesses;
-
-    unless (defined($value) && length($value)) {
-        $value = $self->loc('(no value)');
-    }
-
-    if (!ref($value) && !ref($old_value)) {
-        RT->Logger->info($self->CurrentUser->Name . " changed " . $self->Name . " from " . $old_value . " to " . $value);
-        return ($ok, $self->loc('[_1] changed from "[_2]" to "[_3]"', $self->Name, $old_value, $value));
-    } else {
-        RT->Logger->info($self->CurrentUser->Name . " changed " . $self->Name);
-        return ($ok, $self->loc("[_1] changed", $self->Name));
-    }
 }
 
 =head2 ValidateContent
@@ -362,6 +364,50 @@ sub ValidateContent {
 
 Documented for internal use only, do not call these from outside
 RT::Configuration itself.
+
+
+=head2 _Create
+
+=cut
+
+sub _Create {
+    my $self = shift;
+    my %args = (
+        Name => '',
+        Content => '',
+        ContentType => '',
+        _Replace => 0,
+        @_
+    );
+    my $meta = RT->Config->Meta($args{'Name'});
+    if ($meta->{Immutable}) {
+        return ( 0, $self->loc("You cannot update [_1] using database config; you must edit your site config", $args{'Name'}) );
+    }
+
+    if (ref ($args{'Content'}) ) {
+        ($args{'Content'}, my $error) = $self->_SerializeContent($args{'Content'}, $args{'Name'});
+        if ($error) {
+            return (0, $error);
+        }
+        $args{'ContentType'} = 'perl';
+    }
+
+    if ($args{'_Replace'}) {
+        if ($self->Content eq $args{'Content'}) {
+            return (1, $self->loc("[_1] update: Nothing changed", ucfirst($args{'Name'})));
+        }
+    }
+
+    my ( $id, $msg ) = $self->SUPER::Create(
+        map { $_ => $args{$_} } qw(Name Content ContentType),
+    );
+    unless ($id) {
+        return (0, $self->loc("Setting [_1] to [_2] failed: [_3]", $args{Name}, $args{Content}, $msg));
+    }
+
+    return ($id, $msg, $args{'Content'});
+}
+
 
 =head2 _Set
 
@@ -403,6 +449,7 @@ sub _SerializeContent {
     my $content = shift;
     require Data::Dumper;
     local $Data::Dumper::Terse = 1;
+    local $Data::Dumper::Sortkeys = 1;
     my $frozen = Data::Dumper::Dumper($content);
     chomp $frozen;
     return $frozen;
