@@ -51,7 +51,7 @@ div.history-container {
 
 
 .history .transaction span.date {
- width: 15em;
+ width: auto;
 }
 
 
